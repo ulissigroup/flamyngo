@@ -7,7 +7,7 @@ from pymongo import MongoClient
 from monty.serialization import loadfn
 from monty.json import jsanitize
 
-from flask import render_template, make_response
+from flask import render_template, make_response, send_from_directory
 from flask.json import jsonify
 
 from flamyngo.app import app
@@ -29,6 +29,17 @@ CSETTINGS = {d["name"]: d for d in SETTINGS["collections"]}
 AUTH_USER = SETTINGS.get("AUTH_USER", None)
 AUTH_PASSWD = SETTINGS.get("AUTH_PASSWD", None)
 
+
+#################### ZU Modified  #####################
+from ase.db.row import AtomsRow,atoms2dict
+import ase.db.web
+from vasp.mongo import mongo_doc_atoms,MongoDatabase
+import time
+from ase.db.summary import Summary
+from ase.db.jsondb import JSONDatabase
+import tempfile
+tmpdir = tempfile.mkdtemp()  # used to cache png-files
+#######################################################
 
 def check_auth(username, password):
     """
@@ -127,6 +138,9 @@ def query():
     except Exception as ex:
         error_message = str(ex)
 
+    #if len(results)>500:
+    #    results=results[0:500]
+
     return make_response(render_template(
         'index.html', collection_name=cname,
         results=results, fields=fields, search_string=search_string,
@@ -182,12 +196,26 @@ def get_data():
         data = []
     return jsonify(jsanitize(data))
 
-
 @app.route('/<string:collection_name>/doc/<string:uid>')
 @requires_auth
 def get_doc(collection_name, uid):
+    settings = CSETTINGS[collection_name]
+    criteria = {
+        settings["unique_key"]: process(uid, settings["unique_key_type"])}
+    doc = DB[collection_name].find_one(criteria)
+    atoms=mongo_doc_atoms(doc)
+    atoms.set_constraint()
+    row=AtomsRow(atoms2dict(atoms))
+    
+    row.id=uid
+    row.ctime=time.mktime(doc['ctime'].timetuple())
+    row.user=doc['user']
+    meta={'layout': [('Basic properties', [['ATOMS1', 'CELL'], ['ATOMS0',('Key Value Pairs', ['id', 'formula', 'age']), 'FORCES']])], 'title': 'ASE database', 'all_keys': [('age', 'Time since creation', ''), ('calculator', 'ASE-calculator name', ''), ('charge', 'Charge', '|e|'), ('energy', 'Total energy', 'eV'), ('fmax', 'Maximum force', 'eV/Ang'), ('formula', 'Chemical formula', ''), ('id', 'Uniqe row ID', ''), ('magmom', 'Magnetic moment', 'au'), ('mass', 'Mass', 'au'), ('unique_id', 'Unique ID', ''), ('user', 'Username', ''), ('volume', 'Volume of unit-cell', 'Ang<sup>3</sup>')], 'key_descriptions': {'magmom': ('Magnetic moment', 'Magnetic moment', 'au'), 'fmax': ('Maximum force', 'Maximum force', 'eV/Ang'), 'energy': ('Energy', 'Total energy', 'eV'), 'unique_id': ('Unique ID', 'Unique ID', ''), 'volume': ('Volume', 'Volume of unit-cell', 'Ang<sup>3</sup>'), 'age': ('Age', 'Time since creation', ''), 'charge': ('Charge', 'Charge', '|e|'), 'mass': ('Mass', 'Mass', 'au'), 'user': ('Username', 'Username', ''), 'formula': ('Formula', 'Chemical formula', ''), 'id': ('ID', 'Uniqe row ID', ''), 'calculator': ('Calculator', 'ASE-calculator name', '')}, 'default_columns': ['id', 'formula'], 'special_keys': []}
+    s=Summary(row,meta=meta)
     return make_response(render_template(
-        'doc.html', collection_name=collection_name, doc_id=uid)
+        'doc.html', collection_name=collection_name, doc_id=uid,s=s,open_ase_gui=False,                           n1=2,
+                           n2=2,
+                           n3=1,)
     )
 
 
@@ -198,7 +226,35 @@ def get_doc_json(collection_name, uid):
     criteria = {
         settings["unique_key"]: process(uid, settings["unique_key_type"])}
     doc = DB[collection_name].find_one(criteria)
+    print(jsanitize(doc))
     return jsonify(jsanitize(doc))
+
+@app.route('/<string:collection_name>/cif/<string:uid>')
+@requires_auth
+def get_cif(collection_name, uid):
+    path = os.path.join(tmpdir, uid+'.cif')
+    if not os.path.isfile(path):
+        settings = CSETTINGS[collection_name]
+        criteria = {
+            settings["unique_key"]: process(uid, settings["unique_key_type"])}
+        doc = DB[collection_name].find_one(criteria)
+        atoms=mongo_doc_atoms(doc)
+        atoms.write(path)
+    return send_from_directory(tmpdir, uid+'.cif')
+
+@app.route('/<string:collection_name>/cif_initial/<string:uid>')
+@requires_auth
+def get_initial_cif(collection_name, uid):
+    path = os.path.join(tmpdir, uid+'_initial.cif')
+    if not os.path.isfile(path):
+        settings = CSETTINGS[collection_name]
+        criteria = {
+            settings["unique_key"]: process(uid, settings["unique_key_type"])}
+        doc = DB[collection_name].find_one(criteria)
+        atoms=mongo_doc_atoms(doc['initial_configuration'])
+        atoms.write(path)
+    return send_from_directory(tmpdir, uid+'_initial.cif')
+
 
 
 def process(val, vtype):
